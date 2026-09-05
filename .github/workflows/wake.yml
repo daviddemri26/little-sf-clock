@@ -74,7 +74,6 @@ jobs:
                   'Accept': 'application/json',
                   'X-Scheduler-Run-Id': os.environ['GITHUB_RUN_ID'],
                   'User-Agent': 'Little-SF-Clock/1.0',
-                  'Origin': 'https://little-sf.david-eden.chatgpt.site',
               })
               with opener.open(request, timeout=35) as response:
                   status = response.status
@@ -83,23 +82,6 @@ jobs:
               print('Wake accepted (HTTP %s).' % status)
           except HTTPError as error:
               print('%s failed (HTTP %s).' % (stage, error.code))
-              print('Response type:', error.headers.get('Content-Type', ''), 'Server:', error.headers.get('Server', ''))
-              body = error.read(5000).decode('utf-8', errors='replace')
-              try:
-                  details = json.loads(body)
-                  print('Error fields:', ','.join(details.keys()))
-                  print('Error category:', str(details.get('error', details.get('detail', details.get('message', ''))))[:300])
-              except Exception:
-                  import re
-                  title = re.search(r'<title>([^<]{0,150})</title>', body)
-                  print('Response title:', title.group(1) if title else 'not provided')
-              if stage == 'Wake':
-                  diagnostic = Request(url, data=b'{}', method='POST', headers={'X-Little-SF-Identity': 'Bearer ' + token, 'Content-Type': 'application/json'})
-                  try:
-                      with opener.open(diagnostic, timeout=35) as result:
-                          print('Namespaced identity response:', result.status)
-                  except HTTPError as failure:
-                      print('Namespaced identity response:', failure.code)
               sys.exit(1)
           except (URLError, TimeoutError):
               print('%s failed: network error or timeout.' % stage)
