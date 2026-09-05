@@ -1,0 +1,154 @@
+name: Little SF scheduler
+
+on:
+  schedule:
+    - cron: '3-58/5 * * * *'
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: little-sf-scheduler
+  cancel-in-progress: false
+
+jobs:
+  wake:
+    if: ${{ github.repository_owner == 'daviddemri26' && github.event.repository.private == false && github.ref_name == github.event.repository.default_branch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Wake the server
+        env:
+          SCHEDULER_URL: https://little-sf.david-eden.chatgpt.site/api/tick
+          SCHEDULER_TOKEN: ${{ secrets.LITTLE_SF_SCHEDULER_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          from urllib.error import HTTPError, URLError
+          from urllib.parse import urlsplit
+          from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+
+          try:
+              url = os.environ.get('SCHEDULER_URL', '')
+              token = os.environ.get('SCHEDULER_TOKEN', '')
+              parts = urlsplit(url)
+              if (parts.scheme != 'https' or not parts.hostname or
+                  parts.username or parts.password or parts.query or parts.fragment or not token):
+                  raise ValueError('invalid configuration')
+              payload = json.dumps({'runId': os.environ['GITHUB_RUN_ID']}).encode()
+              request = Request(url, data=payload, method='POST', headers={
+                  'Authorization': 'Bearer ' + token,
+                  'Content-Type': 'application/json',
+                  'Accept': 'application/json',
+                  'X-Scheduler-Run-Id': os.environ['GITHUB_RUN_ID'],
+              })
+              with build_opener(NoRedirect()).open(request, timeout=35) as response:
+                  status = response.status
+                  if not 200 <= status < 300:
+                      raise ValueError('unexpected HTTP status')
+              print('Wake accepted (HTTP %s).' % status)
+          except HTTPError as error:
+              print('Wake failed (HTTP %s).' % error.code)
+              sys.exit(1)
+          except (URLError, TimeoutError):
+              print('Wake failed: network error or timeout.')
+              sys.exit(1)
+          except Exception:
+              print('Wake failed: check scheduler configuration or server availability.')
+              sys.exit(1)
+          PY
+
+  heartbeat:
+    needs: wake
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '17 4 * * 1') && github.repository_owner == 'daviddemri26' && github.event.repository.private == false && github.ref_name == github.event.repository.default_branch && needs.wake.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: write
+    steps:
+      - name: Record operation heartbeat at most every 28 days
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WAKE_RESULT: ${{ needs.wake.result }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, sys
+          from datetime import datetime, timedelta, timezone
+          from urllib.error import HTTPError, URLError
+          from urllib.parse import quote, urlencode
+          from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+
+          def main():
+              owner, repo = os.environ['GITHUB_REPOSITORY'].split('/')
+              branch = os.environ['DEFAULT_BRANCH']
+              base = ('https://api.github.com/repos/' + quote(owner, safe='') + '/' +
+                      quote(repo, safe='') + '/contents/.scheduler-heartbeat.json')
+              headers = {
+                  'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'],
+                  'Accept': 'application/vnd.github+json',
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'little-sf-scheduler',
+              }
+              opener = build_opener(NoRedirect())
+              now = datetime.now(timezone.utc)
+              sha = None
+              try:
+                  request = Request(base + '?' + urlencode({'ref': branch}), headers=headers)
+                  with opener.open(request, timeout=35) as response:
+                      metadata = json.loads(response.read(65536))
+                  if metadata.get('type') != 'file' or metadata.get('encoding') != 'base64':
+                      raise ValueError('unexpected heartbeat file')
+                  saved = json.loads(base64.b64decode(metadata['content']))
+                  last = datetime.fromisoformat(saved['last_heartbeat_utc'].replace('Z', '+00:00'))
+                  if last.tzinfo is None or last > now:
+                      raise ValueError('invalid heartbeat timestamp')
+                  if now - last < timedelta(days=28):
+                      print('Operation heartbeat is current; no commit needed.')
+                      return
+                  sha = metadata['sha']
+              except HTTPError as error:
+                  if error.code != 404:
+                      raise
+
+              record = {
+                  'schema': 1,
+                  'last_heartbeat_utc': now.isoformat(timespec='seconds').replace('+00:00', 'Z'),
+                  'run_id': os.environ['GITHUB_RUN_ID'],
+                  'wake_result_at_heartbeat': os.environ['WAKE_RESULT'],
+              }
+              payload = {
+                  'message': 'chore: record scheduler operation heartbeat',
+                  'branch': branch,
+                  'content': base64.b64encode((json.dumps(record, indent=2) + '\n').encode()).decode(),
+              }
+              if sha is not None:
+                  payload['sha'] = sha
+              request = Request(base, data=json.dumps(payload).encode(), headers=headers, method='PUT')
+              with opener.open(request, timeout=35) as response:
+                  if response.status not in (200, 201):
+                      raise ValueError('unexpected GitHub status')
+              print('Operation heartbeat committed.')
+
+          try:
+              main()
+          except HTTPError as error:
+              print('Operation heartbeat failed (GitHub HTTP %s).' % error.code)
+              sys.exit(1)
+          except (URLError, TimeoutError):
+              print('Operation heartbeat failed: network error or timeout.')
+              sys.exit(1)
+          except Exception:
+              print('Operation heartbeat failed: check repository permissions and heartbeat file.')
+              sys.exit(1)
+          PY
