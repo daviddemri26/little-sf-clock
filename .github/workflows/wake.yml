@@ -73,6 +73,8 @@ jobs:
                   'Content-Type': 'application/json',
                   'Accept': 'application/json',
                   'X-Scheduler-Run-Id': os.environ['GITHUB_RUN_ID'],
+                  'User-Agent': 'Little-SF-Clock/1.0',
+                  'Origin': 'https://little-sf.david-eden.chatgpt.site',
               })
               with opener.open(request, timeout=35) as response:
                   status = response.status
@@ -85,7 +87,8 @@ jobs:
               body = error.read(5000).decode('utf-8', errors='replace')
               try:
                   details = json.loads(body)
-                  print('Error category:', str(details.get('error', ''))[:300])
+                  print('Error fields:', ','.join(details.keys()))
+                  print('Error category:', str(details.get('error', details.get('detail', details.get('message', ''))))[:300])
               except Exception:
                   import re
                   title = re.search(r'<title>([^<]{0,150})</title>', body)
