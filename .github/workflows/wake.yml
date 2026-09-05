@@ -17,30 +17,56 @@ jobs:
     if: ${{ github.repository_owner == 'daviddemri26' && github.event.repository.private == false && github.ref_name == github.event.repository.default_branch }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    permissions: {}
+    permissions:
+      id-token: write
     steps:
-      - name: Wake the server
+      - name: Wake the server with a temporary GitHub identity
         env:
           SCHEDULER_URL: https://little-sf.david-eden.chatgpt.site/api/tick
-          SCHEDULER_TOKEN: ${{ secrets.LITTLE_SF_SCHEDULER_TOKEN }}
+          OIDC_AUDIENCE: https://little-sf.david-eden.chatgpt.site/api/tick
         run: |
-          python3 - <<'PY'
+          python3 - <<'PYTHON'
           import json, os, sys
           from urllib.error import HTTPError, URLError
-          from urllib.parse import urlsplit
+          from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
           from urllib.request import HTTPRedirectHandler, Request, build_opener
 
           class NoRedirect(HTTPRedirectHandler):
               def redirect_request(self, *args, **kwargs):
                   return None
 
+          stage = 'Identity request'
           try:
-              url = os.environ.get('SCHEDULER_URL', '')
-              token = os.environ.get('SCHEDULER_TOKEN', '')
-              parts = urlsplit(url)
+              url = os.environ['SCHEDULER_URL']
+              audience = os.environ['OIDC_AUDIENCE']
+              if url != 'https://little-sf.david-eden.chatgpt.site/api/tick' or audience != url:
+                  raise ValueError('invalid scheduler configuration')
+              identity_url = os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']
+              request_token = os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']
+              parts = urlsplit(identity_url)
               if (parts.scheme != 'https' or not parts.hostname or
-                  parts.username or parts.password or parts.query or parts.fragment or not token):
-                  raise ValueError('invalid configuration')
+                  parts.username or parts.password or parts.fragment or not request_token):
+                  raise ValueError('invalid identity configuration')
+              query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
+                       if key != 'audience']
+              query.append(('audience', audience))
+              identity_url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ''))
+              opener = build_opener(NoRedirect())
+              request = Request(identity_url, headers={
+                  'Authorization': 'Bearer ' + request_token,
+                  'Accept': 'application/json',
+              })
+              with opener.open(request, timeout=35) as response:
+                  if response.status != 200:
+                      raise ValueError('unexpected identity status')
+                  raw = response.read(65537)
+                  if len(raw) > 65536:
+                      raise ValueError('identity response too large')
+                  token = json.loads(raw).get('value')
+              if (not isinstance(token, str) or not 100 < len(token) <= 16384 or
+                  token.count('.') != 2 or any(character.isspace() for character in token)):
+                  raise ValueError('invalid identity response')
+              stage = 'Wake'
               payload = json.dumps({'runId': os.environ['GITHUB_RUN_ID']}).encode()
               request = Request(url, data=payload, method='POST', headers={
                   'Authorization': 'Bearer ' + token,
@@ -48,21 +74,21 @@ jobs:
                   'Accept': 'application/json',
                   'X-Scheduler-Run-Id': os.environ['GITHUB_RUN_ID'],
               })
-              with build_opener(NoRedirect()).open(request, timeout=35) as response:
+              with opener.open(request, timeout=35) as response:
                   status = response.status
                   if not 200 <= status < 300:
                       raise ValueError('unexpected HTTP status')
               print('Wake accepted (HTTP %s).' % status)
           except HTTPError as error:
-              print('Wake failed (HTTP %s).' % error.code)
+              print('%s failed (HTTP %s).' % (stage, error.code))
               sys.exit(1)
           except (URLError, TimeoutError):
-              print('Wake failed: network error or timeout.')
+              print('%s failed: network error or timeout.' % stage)
               sys.exit(1)
           except Exception:
-              print('Wake failed: check scheduler configuration or server availability.')
+              print('%s failed: check workflow configuration or server availability.' % stage)
               sys.exit(1)
-          PY
+          PYTHON
 
   heartbeat:
     needs: wake
